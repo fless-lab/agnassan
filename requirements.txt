@@ -1,0 +1,37 @@
+# Core dependencies
+pyyaml>=6.0
+
+# API clients - Optional for commercial models
+# openai>=1.0.0
+# anthropic>=0.8.0
+huggingface-hub>=0.19.0
+# cohere>=4.5.0
+
+# Token counting
+tiktoken>=0.5.0
+
+# Local models - Required for open-source models
+transformers>=4.35.0
+torch>=2.0.0
+accelerate>=0.20.0  # For efficient model loading
+bitsandbytes>=0.40.0  # For quantization support
+safetensors>=0.3.1  # For safer model loading
+
+# Vision and multimodal support
+pillow>=10.0.0
+numpy>=1.24.0
+opencv-python>=4.7.0  # For advanced image processing
+
+# Open-source vision models
+clip>=1.0  # For CLIP models
+timm>=0.6.13  # For vision transformers
+
+# Async support
+asyncio>=3.4.3
+aiohttp>=3.8.5
+
+# Logging
+logging>=0.5.1.2
+
+# Optional dependencies
+# replicate>=0.15.0  # For Replicate models
