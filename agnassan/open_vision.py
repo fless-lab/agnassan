@@ -327,5 +327,7 @@ def create_open_vision_model_interface(config: ModelConfig) -> VisionModelInterf
     else:
         logging.getLogger("agnassan.open_vision").warning(f"Unknown vision model type: {model_type}, defaulting to CLIP")
         return CLIPVisionInterface(config)
+    """
     else:
         raise ValueError(f"Unsupported open-source vision model type: {model_type}")
+    """
