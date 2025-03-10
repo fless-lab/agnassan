@@ -217,11 +217,18 @@ class ReasoningEngine:
             "meta_critique": MetaCritique()
         }
         
-        # Try to import and register ReAct reasoning if available
+        # Try to import and register ReAct reasoning with tools integration if available
         try:
             from .react import ReActReasoning, create_default_actions
-            react_technique = ReActReasoning(actions=create_default_actions())
-            self.techniques["react"] = react_technique
+            # First try to use tools integration if available
+            try:
+                from .tools.react_integration import create_react_with_tools
+                react_technique = create_react_with_tools()
+                self.techniques["react"] = react_technique
+            except ImportError:
+                # Fall back to default actions if tools integration is not available
+                react_technique = ReActReasoning(actions=create_default_actions())
+                self.techniques["react"] = react_technique
         except ImportError:
             pass
             

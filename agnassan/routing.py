@@ -29,7 +29,8 @@ class QueryClassifier:
             "complex_reasoning": r"(why|analyze|evaluate|compare|contrast|critique|implications|consequences)",
             "long_context": r"(document|summarize|article|book|chapter|text|transcript|conversation)",
             "vision": r"(image|picture|photo|screenshot|diagram|chart|graph|visual|see|look|view)",
-            "multimodal": r"(website|mockup|design|ui|ux|interface|layout|document analysis|extract from image)"
+            "multimodal": r"(website|mockup|design|ui|ux|interface|layout|document analysis|extract from image)",
+            "tool_usage": r"(search|find|look up|fetch|analyze data|process|format|extract|transform|web search|tokenize|parse|summarize webpage|resize image|crop image)"
         }
     
     def classify(self, query: str) -> Dict[str, float]:
