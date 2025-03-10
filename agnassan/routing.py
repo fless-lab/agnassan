@@ -7,6 +7,9 @@ from typing import Dict, List, Any, Optional, Union, Tuple
 import re
 import asyncio
 import logging
+import json
+import hashlib
+from functools import lru_cache
 
 from .config import AgnassanConfig, ModelConfig
 from .models import ModelInterface, LLMResponse, create_model_interface
@@ -105,9 +108,17 @@ class ReasoningSelector:
             "parallel_thought_chains": r"(combine approaches|multiple techniques|parallel thinking|diverse reasoning|synthesis|comprehensive analysis)",
             "iterative_loops": r"(progressive refinement|sequential improvement|iterative process|build upon|loop|cycle|repeated enhancement)"
         }
+        self.logger = logging.getLogger("agnassan.reasoning_selector")
+        # Initialize the technique detection cache
+        self._technique_detection_cache = {}
+        self._max_cache_size = 100
+    
+    def _get_query_hash(self, query: str) -> str:
+        """Generate a hash for a query to use as cache key."""
+        return hashlib.md5(query.encode()).hexdigest()
     
     def select_technique(self, query: str) -> str:
-        """Select the most appropriate reasoning technique for the query."""
+        """Select the most appropriate reasoning technique for the query using pattern matching."""
         query = query.lower()
         scores = {}
         
@@ -121,6 +132,79 @@ class ReasoningSelector:
             return "chain_of_thought"  # Default technique
         
         return max(scores.items(), key=lambda x: x[1])[0]
+    
+    async def select_technique_with_model(self, query: str, model_interface: Optional[ModelInterface] = None) -> List[str]:
+        """Select the most appropriate reasoning techniques using a lightweight model with caching.
+        
+        Args:
+            query: The user query
+            model_interface: Optional model interface to use for detection
+            
+        Returns:
+            List of recommended reasoning technique names
+        """
+        # Check cache first
+        query_hash = self._get_query_hash(query)
+        if query_hash in self._technique_detection_cache:
+            self.logger.debug(f"Using cached reasoning techniques for query: {query[:50]}...")
+            return self._technique_detection_cache[query_hash]
+        
+        # If no model provided or model is too expensive/slow, fall back to pattern matching
+        if model_interface is None:
+            return [self.select_technique(query)]
+        
+        try:
+            # Create a prompt that asks the model to analyze the query
+            techniques_prompt = f"""Analyze this query and determine which reasoning techniques would be most appropriate.
+            Available techniques: chain_of_thought, tree_of_thought, iterative_refinement, meta_critique, react, parallel_thought_chains, iterative_loops
+            
+            Query: "{query}"
+            
+            Return only the names of the recommended techniques as a JSON array, e.g., ["chain_of_thought", "meta_critique"]"""
+            
+            # Generate response from the model
+            response = await model_interface.generate(techniques_prompt, max_tokens=50, temperature=0.3)
+            
+            # Parse the response to extract technique names
+            try:
+                # Try to parse as JSON
+                response_text = response.text.strip()
+                # Find JSON array in the response if it's not a clean JSON
+                if not response_text.startswith('['):
+                    import re
+                    json_match = re.search(r'\[(.*?)\]', response_text)
+                    if json_match:
+                        response_text = json_match.group(0)
+                
+                techniques = json.loads(response_text)
+                if isinstance(techniques, list) and all(isinstance(t, str) for t in techniques):
+                    # Validate that all techniques exist in our reasoning engine
+                    valid_techniques = [t for t in techniques if t in self.reasoning_engine.techniques]
+                    if valid_techniques:
+                        self.logger.info(f"Model detected reasoning techniques: {valid_techniques}")
+                        
+                        # Cache the result before returning
+                        if len(self._technique_detection_cache) >= self._max_cache_size:
+                            # Remove a random item if cache is full
+                            self._technique_detection_cache.pop(next(iter(self._technique_detection_cache)))
+                        
+                        self._technique_detection_cache[query_hash] = valid_techniques
+                        return valid_techniques
+                    else:
+                        self.logger.warning("Model returned no valid techniques, using fallback")
+                else:
+                    self.logger.warning(f"Invalid model response format: {response.text}")
+            except json.JSONDecodeError:
+                self.logger.warning(f"Could not parse model response as JSON: {response.text}")
+                
+            # If we reach here, something went wrong with the model or parsing
+            fallback_technique = self.select_technique(query)
+            return [fallback_technique]
+            
+        except Exception as e:
+            self.logger.error(f"Error using model for technique detection: {str(e)}")
+            fallback_technique = self.select_technique(query)
+            return [fallback_technique]
 
 
 class Router:
@@ -173,13 +257,26 @@ class Router:
         scores = classifier.classify(query)
         return scores.get("vision", 0) > 0.3 or scores.get("multimodal", 0) > 0.3
     
-    async def route_query(self, query: str, strategy: str = "auto", image_path: str = None) -> LLMResponse:
+    async def _detect_reasoning_techniques(self, query: str, model_interface: Optional[ModelInterface] = None) -> List[str]:
+        """Detect appropriate reasoning techniques for a given query using model-based approach.
+        
+        Args:
+            query: The user query
+            model_interface: Optional model interface to use for detection
+            
+        Returns:
+            List of recommended reasoning technique names
+        """
+        return await self.reasoning_selector.select_technique_with_model(query, model_interface)
+    
+    async def route_query(self, query: str, strategy: str = "auto", image_path: str = None, **kwargs) -> LLMResponse:
         """Route a query to the appropriate model(s) and apply reasoning techniques.
         
         Args:
             query: The text query to process
             strategy: The routing strategy to use (default, auto, parallel)
             image_path: Optional path to an image for multimodal queries
+            **kwargs: Additional parameters to pass to the model
         """
         self.logger.info(f"Routing query with strategy: {strategy}")
         
@@ -232,82 +329,135 @@ class Router:
                         self.logger.info(f"Using commercial vision model: {model_name}")
                         break
             
+            # If no suitable model found, use the default model (which may not have vision capabilities)
             if not vision_model_name:
-                self.logger.warning("No vision-capable models found in configuration")
-                # Fall back to regular text processing
-                is_multimodal = False
-            else:
-                # Process the multimodal query
-                vision_model = self._get_vision_model_interface(vision_model_name)
-                multimodal_processor = create_multimodal_processor(self.config.get_model_config(vision_model_name))
-                
-                if image_path:
-                    return await multimodal_processor.process_text_and_image(query, image_path, vision_model)
-                else:
-                    # If no image path was provided but the query seems multimodal,
-                    # we'll just use the vision-capable model for text processing
-                    return await vision_model.generate(query)
+                vision_model_name = self.config.default_model
+                self.logger.warning(f"No vision-capable model found, using default model: {vision_model_name}")
+            
+            # Create the vision model interface
+            vision_model = self._get_vision_model_interface(vision_model_name)
+            
+            # Create the multimodal processor
+            multimodal_processor = create_multimodal_processor(vision_model)
+            
+            # Process the multimodal query
+            self.logger.info(f"Processing multimodal query with model: {vision_model_name}")
+            
+            # Detect reasoning techniques using a lightweight model if available
+            lightweight_model_name = self.config.parameters.get("lightweight_model")
+            reasoning_techniques = []
+            
+            if lightweight_model_name:
+                try:
+                    lightweight_model = self._get_model_interface(lightweight_model_name)
+                    reasoning_techniques = await self._detect_reasoning_techniques(query, lightweight_model)
+                except Exception as e:
+                    self.logger.warning(f"Error using lightweight model for technique detection: {str(e)}")
+            
+            if not reasoning_techniques:
+                reasoning_techniques = await self._detect_reasoning_techniques(query)
+            
+            self.logger.info(f"Selected reasoning techniques: {reasoning_techniques}")
+            
+            # Process the multimodal query with the selected reasoning techniques
+            return await multimodal_processor.process_text_and_image(
+                query, image_path, reasoning_techniques=reasoning_techniques, **kwargs
+            )
         
-        # Regular text query processing
+        # For text-only queries, use the selected routing strategy
         if strategy == "default":
-            # Use only the default model with chain of thought reasoning
-            model_interface = self._get_model_interface(self.config.default_model)
-            return await self.reasoning_engine.apply_technique("chain_of_thought", query, model_interface)
+            # Use the default model
+            model_name = self.config.default_model
+            model = self._get_model_interface(model_name)
+            
+            # Detect reasoning techniques
+            reasoning_techniques = await self._detect_reasoning_techniques(query, model)
+            
+            # Apply the selected reasoning techniques
+            return await self.reasoning_engine.apply_techniques(query, model, reasoning_techniques, **kwargs)
+        
+        elif strategy == "auto":
+            # Select the most appropriate model(s) for the query
+            selected_models = self.model_selector.select_models(query, max_models=1)
+            model_name = selected_models[0]
+            model = self._get_model_interface(model_name)
+            
+            # Detect reasoning techniques using a lightweight model if available
+            lightweight_model_name = self.config.parameters.get("lightweight_model")
+            reasoning_techniques = []
+            
+            if lightweight_model_name:
+                try:
+                    lightweight_model = self._get_model_interface(lightweight_model_name)
+                    reasoning_techniques = await self._detect_reasoning_techniques(query, lightweight_model)
+                except Exception as e:
+                    self.logger.warning(f"Error using lightweight model for technique detection: {str(e)}")
+            
+            if not reasoning_techniques:
+                reasoning_techniques = await self._detect_reasoning_techniques(query, model)
+            
+            self.logger.info(f"Selected model: {model_name}, reasoning techniques: {reasoning_techniques}")
+            
+            # Apply the selected reasoning techniques
+            return await self.reasoning_engine.apply_techniques(query, model, reasoning_techniques, **kwargs)
         
         elif strategy == "parallel":
-            # Use all configured models in parallel
-            model_names = [model.name for model in self.config.models]
-            model_interfaces = [self._get_model_interface(name) for name in model_names]
+            # Select multiple models to use in parallel
+            selected_models = self.model_selector.select_models(query, max_models=2)
+            self.logger.info(f"Selected models for parallel execution: {selected_models}")
             
-            # Create a parallel reasoning technique with all models
-            parallel_technique = self.reasoning_engine.techniques.get("parallel_reasoning")
-            if not parallel_technique:
-                from .reasoning import ParallelReasoning
-                parallel_technique = ParallelReasoning(model_interfaces)
-                self.reasoning_engine.register_technique(parallel_technique)
+            # Create model interfaces
+            models = [self._get_model_interface(name) for name in selected_models]
             
-            # Use the default model to synthesize the results
-            default_model = self._get_model_interface(self.config.default_model)
-            return await parallel_technique.apply(query, default_model)
+            # Detect reasoning techniques using a lightweight model if available
+            lightweight_model_name = self.config.parameters.get("lightweight_model")
+            reasoning_techniques = []
+            
+            if lightweight_model_name:
+                try:
+                    lightweight_model = self._get_model_interface(lightweight_model_name)
+                    reasoning_techniques = await self._detect_reasoning_techniques(query, lightweight_model)
+                except Exception as e:
+                    self.logger.warning(f"Error using lightweight model for technique detection: {str(e)}")
+            
+            if not reasoning_techniques:
+                # Use the first model to detect reasoning techniques
+                reasoning_techniques = await self._detect_reasoning_techniques(query, models[0])
+            
+            self.logger.info(f"Selected reasoning techniques: {reasoning_techniques}")
+            
+            # Execute queries in parallel
+            tasks = [
+                self.reasoning_engine.apply_techniques(query, model, reasoning_techniques, **kwargs)
+                for model in models
+            ]
+            
+            responses = await asyncio.gather(*tasks)
+            
+            # Select the best response based on a quality heuristic
+            # For now, we'll use the response with the most tokens as a simple heuristic
+            best_response = max(responses, key=lambda r: r.tokens_used)
+            
+            # Add metadata about the parallel execution
+            best_response.metadata["parallel_execution"] = {
+                "models_used": selected_models,
+                "selected_response": best_response.model_name
+            }
+            
+            return best_response
         
-        else:  # "auto" or any other strategy
-            # Select the most appropriate models and reasoning technique
-            selected_model_names = self.model_selector.select_models(query)
-            reasoning_technique = self.reasoning_selector.select_technique(query)
-            
-            self.logger.info(f"Selected models: {selected_model_names}")
-            self.logger.info(f"Selected reasoning technique: {reasoning_technique}")
-            
-            if len(selected_model_names) == 1:
-                # Use a single model with the selected reasoning technique
-                model_interface = self._get_model_interface(selected_model_names[0])
-                
-                # Special handling for advanced reasoning techniques that need the reasoning engine
-                if reasoning_technique in ["parallel_thought_chains", "iterative_loops"]:
-                    technique = self.reasoning_engine.techniques[reasoning_technique]
-                    return await technique.apply(query, model_interface, self.reasoning_engine, **kwargs)
-                else:
-                    return await self.reasoning_engine.apply_technique(reasoning_technique, query, model_interface)
-            else:
-                # Get model interfaces for all selected models
-                model_interfaces = [self._get_model_interface(name) for name in selected_model_names]
-                primary_model = self._get_model_interface(selected_model_names[0])
-                
-                # Check if we should use one of our advanced reasoning techniques
-                if reasoning_technique in ["parallel_thought_chains", "iterative_loops"]:
-                    # Use the advanced technique with the primary model, but pass the reasoning engine
-                    technique = self.reasoning_engine.techniques[reasoning_technique]
-                    return await technique.apply(query, primary_model, self.reasoning_engine, **kwargs)
-                elif reasoning_technique == "react":
-                    # For ReAct, just use the primary model
-                    return await self.reasoning_engine.apply_technique(reasoning_technique, query, primary_model)
-                else:
-                    # For other techniques, use parallel reasoning across multiple models
-                    from .reasoning import ParallelReasoning
-                    parallel_technique = ParallelReasoning(model_interfaces)
-                    return await parallel_technique.apply(query, primary_model)
+        else:
+            raise ValueError(f"Unknown routing strategy: {strategy}")
     
-    async def close(self) -> None:
+    async def close(self):
         """Close all model interfaces and free resources."""
-        # Implement any cleanup needed for model interfaces
-        pass
+        close_tasks = []
+        for model_interface in self.model_interfaces.values():
+            if hasattr(model_interface, "close") and callable(model_interface.close):
+                close_tasks.append(model_interface.close())
+        
+        if close_tasks:
+            await asyncio.gather(*close_tasks)
+        
+        self.model_interfaces.clear()
+        self.logger.info("Router closed and resources freed")
