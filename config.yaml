@@ -11,6 +11,9 @@ model_registry:
   falcon-7b: ./models/falcon-7b
   mixtral-8x7b: mistralai/Mixtral-8x7B-v0.1
   
+  # Lightweight models for specific tasks
+  distilbert-base: distilbert-base-uncased
+  
   # Vision models
   clip-vit-base: openai/clip-vit-base-patch32
   vit-gpt2-captioning: nlpconnect/vit-gpt2-image-captioning
@@ -109,9 +112,25 @@ models:
       - reasoning
       - creative
     cost_per_token: 0.0
+    
+  - name: technique-detector
+    provider: huggingface
+    parameters:
+      model_id: distilbert-base
+      model_registry: ${model_registry}
+      temperature: 0.3
+      max_tokens: 50
+      task: text-classification
+    strengths:
+      - classification
+      - short_context
+    cost_per_token: 0.0
 
 # Default model to use when no specific routing is needed
 default_model: llama-3-8b
+
+# Lightweight model for reasoning technique detection
+lightweight_model: technique-detector
 
 # Directory for storing logs
 log_dir: ./logs
@@ -119,3 +138,8 @@ log_dir: ./logs
 # Strategy for routing queries to models
 # Options: rule_based, auto, parallel
 routing_strategy: auto
+
+# Additional parameters
+parameters:
+  open_source_only: true  # Set to false to allow commercial models
+  cache_size: 100  # Number of entries to keep in the technique detection cache
