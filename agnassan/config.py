@@ -80,12 +80,14 @@ class AgnassanConfig:
         models: List[ModelConfig],
         default_model: str,
         log_dir: str = "./logs",
-        routing_strategy: str = "rule_based"
+        routing_strategy: str = "rule_based",
+        parameters: Dict[str, Any] = None
     ):
         self.models = models
         self.default_model = default_model
         self.log_dir = log_dir
         self.routing_strategy = routing_strategy
+        self.parameters = parameters or {}
     
     @classmethod
     def from_yaml(cls, config_path: str) -> 'AgnassanConfig':
@@ -109,7 +111,8 @@ class AgnassanConfig:
             models=models,
             default_model=config_dict['default_model'],
             log_dir=config_dict.get('log_dir', './logs'),
-            routing_strategy=config_dict.get('routing_strategy', 'rule_based')
+            routing_strategy=config_dict.get('routing_strategy', 'rule_based'),
+            parameters=config_dict.get('parameters', {})
         )
     
     def save_to_yaml(self, config_path: str) -> None:
@@ -118,7 +121,8 @@ class AgnassanConfig:
             'models': [model.to_dict() for model in self.models],
             'default_model': self.default_model,
             'log_dir': self.log_dir,
-            'routing_strategy': self.routing_strategy
+            'routing_strategy': self.routing_strategy,
+            'parameters': self.parameters
         }
         
         with open(config_path, 'w') as f:
@@ -207,8 +211,15 @@ def create_default_config() -> AgnassanConfig:
         )
     ]
     
+    # Default parameters for the configuration
+    default_parameters = {
+        "lightweight_model": "phi-2",  # Use phi-2 as the lightweight model for reasoning technique detection
+        "open_source_only": True      # Default to using only open-source models
+    }
+    
     return AgnassanConfig(
         models=models,
         default_model="llama-3-8b",
-        routing_strategy="auto"
+        routing_strategy="rule_based",
+        parameters=default_parameters
     )

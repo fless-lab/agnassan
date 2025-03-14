@@ -23,15 +23,13 @@ numpy>=1.24.0
 opencv-python>=4.7.0  # For advanced image processing
 
 # Open-source vision models
-clip>=1.0  # For CLIP models
+#clip>=1.0  # For CLIP models
+clip
 timm>=0.6.13  # For vision transformers
 
 # Async support
 asyncio>=3.4.3
 aiohttp>=3.8.5
-
-# Logging
-logging>=0.5.1.2
 
 # Optional dependencies
 # replicate>=0.15.0  # For Replicate models

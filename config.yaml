@@ -4,12 +4,14 @@
 model_registry:
   # Text models
   mistral-7b: ./models/mistral-7b
-  llama-3-8b: meta-llama/Llama-3-8b-hf
+  llama-3-8b: meta-llama/Meta-Llama-3-8B
   phi-2: ./models/phi-2
   gemma-7b: ./models/gemma-7b
   mpt-7b: ./models/mpt-7b
   falcon-7b: ./models/falcon-7b
   mixtral-8x7b: mistralai/Mixtral-8x7B-v0.1
+  hf-mixtral-7b: mistralai/Mistral-7B-Instruct-v0.1  # Updated model ID for Mixtral-7b
+
   
   # Lightweight models for specific tasks
   distilbert-base: distilbert-base-uncased
@@ -35,17 +37,17 @@ models:
     cost_per_token: 0.0
 
   - name: llama-3-8b
-    provider: huggingface
-    api_key_env: HUGGINGFACE_API_KEY
+    provider: local
     parameters:
       model_id: llama-3-8b
       model_registry: ${model_registry}
+      context_length: 8192
       temperature: 0.7
-      max_tokens: 2048
     strengths:
       - general_knowledge
       - creative
       - long_context
+      - reasoning
     cost_per_token: 0.0
 
   - name: phi-2
@@ -112,6 +114,21 @@ models:
       - reasoning
       - creative
     cost_per_token: 0.0
+
+  - name: hf-mixtral-7b
+    provider: huggingface  # Updated provider to Hugging Face
+    api_key_env: HUGGINGFACE_API_KEY
+    parameters:
+      model_id: mistralai/Mistral-7B-Instruct-v0.1  # Updated model ID for Mixtral-7b
+      model_registry: ${model_registry}
+      temperature: 0.7
+      max_tokens: 4096
+    strengths:
+      - general_knowledge
+      - coding
+      - reasoning
+      - creative
+    cost_per_token: 0.0
     
   - name: technique-detector
     provider: huggingface
@@ -127,7 +144,7 @@ models:
     cost_per_token: 0.0
 
 # Default model to use when no specific routing is needed
-default_model: llama-3-8b
+default_model: hf-mixtral-7b
 
 # Lightweight model for reasoning technique detection
 lightweight_model: technique-detector
@@ -137,9 +154,11 @@ log_dir: ./logs
 
 # Strategy for routing queries to models
 # Options: rule_based, auto, parallel
-routing_strategy: auto
+routing_strategy: rule_based
 
 # Additional parameters
 parameters:
   open_source_only: true  # Set to false to allow commercial models
   cache_size: 100  # Number of entries to keep in the technique detection cache
+  classification_model: technique-detector
+  lightweight_model: technique-detector

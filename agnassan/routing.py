@@ -19,7 +19,7 @@ from .reasoning import ReasoningEngine, ReasoningTechnique
 class QueryClassifier:
     """Classifies queries to determine the most appropriate model."""
     
-    def __init__(self):
+    def __init__(self, config=None):
         # Define patterns for different query types
         self.patterns = {
             "coding": r"(code|program|function|algorithm|script|debug|error|exception|syntax|compile)",
@@ -32,12 +32,22 @@ class QueryClassifier:
             "multimodal": r"(website|mockup|design|ui|ux|interface|layout|document analysis|extract from image)",
             "tool_usage": r"(search|find|look up|fetch|analyze data|process|format|extract|transform|web search|tokenize|parse|summarize webpage|resize image|crop image)"
         }
-    
-    def classify(self, query: str) -> Dict[str, float]:
-        """Classify a query into different task types with confidence scores."""
+        
+        self.config = config
+        self.logger = logging.getLogger("agnassan.query-classifier")
+        self._classification_cache = {}
+        self._max_cache_size = 100
+        
+    def _get_query_hash(self, query: str) -> str:
+        """Generate a hash for a query to use as cache key."""
+        return hashlib.md5(query.encode()).hexdigest()
+        
+    def _pattern_based_classify(self, query: str) -> Dict[str, float]:
+        """Classify a query using regex pattern matching."""
         query = query.lower()
         scores = {}
         
+        # Standard pattern matching
         for task_type, pattern in self.patterns.items():
             matches = re.findall(pattern, query)
             score = len(matches) / max(len(query.split()), 1)  # Normalize by query length
@@ -49,21 +59,123 @@ class QueryClassifier:
                 scores[task_type] = 0.1
         
         return scores
+    
+    async def _model_based_classify(self, query: str, model_interface) -> Dict[str, float]:
+        """Classify a query using a lightweight model."""
+        try:
+            # Create a prompt that asks the model to analyze the query
+            classification_prompt = f"""Analyze this query and determine which task types are most relevant.
+            Available task types: coding, math, creative, general_knowledge, complex_reasoning, long_context, vision, multimodal
+            
+            Query: "{query}"
+            
+            Return only a JSON object with task types as keys and confidence scores (0.0-1.0) as values.
+            Example: {{"coding": 0.8, "math": 0.6, "general_knowledge": 0.3, "creative": 0.1, "complex_reasoning": 0.4, "long_context": 0.1, "vision": 0.1, "multimodal": 0.1}}"""
+            
+            # Generate response from the model
+            print("Using model for classification:", model_interface)
+            response = await model_interface.generate(classification_prompt, max_tokens=100, temperature=0.3)
+            print("Model classification response:", response.text)
+            
+            # Parse the response to extract scores
+            try:
+                # Try to parse as JSON
+                response_text = response.text.strip()
+                # Find JSON object in the response if it's not a clean JSON
+                if not response_text.startswith('{'):
+                    import re
+                    json_match = re.search(r'\{(.*?)\}', response_text, re.DOTALL)
+                    if json_match:
+                        response_text = json_match.group(0)
+                
+                scores = json.loads(response_text)
+                if isinstance(scores, dict) and all(isinstance(scores[k], (int, float)) for k in scores):
+                    # Ensure all task types have a score
+                    for task_type in self.patterns.keys():
+                        if task_type not in scores or not isinstance(scores[task_type], (int, float)):
+                            scores[task_type] = 0.1
+                    
+                    self.logger.info(f"Model-based classification: {scores}")
+                    return scores
+                else:
+                    self.logger.warning(f"Invalid model response format: {response.text}")
+            except json.JSONDecodeError:
+                self.logger.warning(f"Could not parse model response as JSON: {response.text}")
+            
+            # If we reach here, something went wrong with the model or parsing
+            return self._pattern_based_classify(query)
+            
+        except Exception as e:
+            self.logger.error(f"Error using model for classification: {str(e)}")
+            return self._pattern_based_classify(query)
+    
+    async def classify(self, query: str, model_interface=None) -> Dict[str, float]:
+        """Classify a query into different task types with confidence scores.
+        
+        Args:
+            query: The user query
+            model_interface: Optional model interface to use for classification
+            
+        Returns:
+            Dictionary of task types and confidence scores
+        """
+        # Check cache first
+        query_hash = self._get_query_hash(query)
+        if query_hash in self._classification_cache:
+            self.logger.debug(f"Using cached classification for query: {query[:50]}...")
+            return self._classification_cache[query_hash]
+        
 
+        print("Model interface for classify : ",model_interface)
+
+        # If no model provided, fall back to pattern matching
+        if model_interface is None:
+            scores = self._pattern_based_classify(query)
+        else:
+            scores = await self._model_based_classify(query, model_interface)
+        
+        # Cache the result before returning
+        if len(self._classification_cache) >= self._max_cache_size:
+            # Remove a random item if cache is full
+            self._classification_cache.pop(next(iter(self._classification_cache)))
+        
+        self._classification_cache[query_hash] = scores
+        return scores
 
 class ModelSelector:
     """Selects the most appropriate model(s) for a given query."""
     
     def __init__(self, config: AgnassanConfig):
         self.config = config
-        self.classifier = QueryClassifier()
+        self.classifier = QueryClassifier(config)
         self.logger = logging.getLogger("agnassan.routing")
+        self.lightweight_model = None
     
-    def select_models(self, query: str, max_models: int = 2) -> List[str]:
+    async def _get_lightweight_model(self):
+        """Get or create a lightweight model interface for classification."""
+        print('self lightweight ?',self.lightweight_model)
+        if self.lightweight_model is None:
+            lightweight_model_name = self.config.parameters.get("classification_model")
+            if lightweight_model_name:
+                try:
+                    from .models import create_model_interface
+                    model_config = self.config.get_model_config(lightweight_model_name)
+                    if model_config:
+                        self.lightweight_model = create_model_interface(model_config)
+                        self.logger.info(f"Using {lightweight_model_name} for query classification")
+                except Exception as e:
+                    self.logger.warning(f"Error initializing classification model: {str(e)}")
+        
+        return self.lightweight_model
+    
+    async def select_models(self, query: str, max_models: int = 2) -> List[str]:
         """Select the most appropriate models for the query."""
+        # Try to use a lightweight model for classification if configured
+        classification_model = await self._get_lightweight_model()
+        print("Classification : ",classification_model)
         # Classify the query
-        task_scores = self.classifier.classify(query)
-        self.logger.debug(f"Query classification: {task_scores}")
+        task_scores = await self.classifier.classify(query, classification_model)
+        self.logger.info(f"Query classification: {task_scores}")
         
         # Calculate model scores based on their strengths and the query classification
         model_scores = {}
@@ -78,23 +190,26 @@ class ModelSelector:
                 score *= 0.8  # Slight penalty for paid models
             
             model_scores[model_config.name] = score
+            self.logger.info(f"Model {model_config.name} score: {score}")
         
-        self.logger.debug(f"Model scores: {model_scores}")
+        self.logger.info(f"Model scores: {model_scores}")
         
         # Select the top N models
         selected_models = sorted(model_scores.keys(), key=lambda x: model_scores[x], reverse=True)[:max_models]
+        self.logger.info(f"Selected models: {selected_models}")
         
         # Always include the default model if it's not already selected
         if self.config.default_model not in selected_models:
             selected_models.append(self.config.default_model)
+            self.logger.info(f"Added default model: {self.config.default_model}")
             if len(selected_models) > max_models:
                 # Remove the lowest-scoring model that isn't the default
                 non_default_models = [m for m in selected_models if m != self.config.default_model]
                 lowest_model = min(non_default_models, key=lambda x: model_scores.get(x, 0))
                 selected_models.remove(lowest_model)
+                self.logger.info(f"Removed lowest scoring model: {lowest_model}")
         
         return selected_models
-
 
 class ReasoningSelector:
     """Selects the most appropriate reasoning technique for a query."""
@@ -252,10 +367,10 @@ class Router:
         
         return create_vision_model_interface(model_config)
     
-    def _is_multimodal_query(self, query: str) -> bool:
+    async def _is_multimodal_query(self, query: str) -> bool:
         """Determine if a query requires multimodal capabilities."""
         classifier = self.model_selector.classifier
-        scores = classifier.classify(query)
+        scores = await classifier.classify(query)
         return scores.get("vision", 0) > 0.3 or scores.get("multimodal", 0) > 0.3
     
     async def _detect_reasoning_techniques(self, query: str, model_interface: Optional[ModelInterface] = None) -> List[str]:
@@ -282,8 +397,8 @@ class Router:
         self.logger.info(f"Routing query with strategy: {strategy}")
         
         # Check if this is a multimodal query (either explicitly via image_path or detected from query text)
-        is_multimodal = image_path is not None or self._is_multimodal_query(query)
-        
+        is_multimodal = image_path is not None or await self._is_multimodal_query(query)
+        print("Is multimodal ?",is_multimodal)
         if is_multimodal and not self.has_vision_support:
             self.logger.warning("Multimodal query detected but vision support not available")
             is_multimodal = False
@@ -378,11 +493,13 @@ class Router:
             return await self.reasoning_engine.apply_techniques(query, model, reasoning_techniques, **kwargs)
         
         elif strategy == "auto":
+            print("We are in auto strategy")
             # Select the most appropriate model(s) for the query
-            selected_models = self.model_selector.select_models(query, max_models=1)
+            selected_models = await self.model_selector.select_models(query, max_models=1)
+            print("Selected models",selected_models)
             model_name = selected_models[0]
             model = self._get_model_interface(model_name)
-            
+            print("rounting model is ",model,model_name)
             # Detect reasoning techniques using a lightweight model if available
             lightweight_model_name = self.config.parameters.get("lightweight_model")
             reasoning_techniques = []
@@ -403,8 +520,9 @@ class Router:
             return await self.reasoning_engine.apply_techniques(query, model, reasoning_techniques, **kwargs)
         
         elif strategy == "parallel":
+            print("we are in parralel strategy")
             # Select multiple models to use in parallel
-            selected_models = self.model_selector.select_models(query, max_models=2)
+            selected_models = await self.model_selector.select_models(query, max_models=2)
             self.logger.info(f"Selected models for parallel execution: {selected_models}")
             
             # Create model interfaces
