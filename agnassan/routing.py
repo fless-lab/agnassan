@@ -282,36 +282,56 @@ class ReasoningSelector:
             response = await model_interface.generate(techniques_prompt, max_tokens=50, temperature=0.3)
             
             # Parse the response to extract technique names
-            try:
-                # Try to parse as JSON
-                response_text = response.text.strip()
-                # Find JSON array in the response if it's not a clean JSON
-                if not response_text.startswith('['):
-                    import re
-                    json_match = re.search(r'\[(.*?)\]', response_text)
-                    if json_match:
-                        response_text = json_match.group(0)
-                
-                techniques = json.loads(response_text)
-                if isinstance(techniques, list) and all(isinstance(t, str) for t in techniques):
-                    # Validate that all techniques exist in our reasoning engine
-                    valid_techniques = [t for t in techniques if t in self.reasoning_engine.techniques]
-                    if valid_techniques:
-                        self.logger.info(f"Model detected reasoning techniques: {valid_techniques}")
-                        
-                        # Cache the result before returning
-                        if len(self._technique_detection_cache) >= self._max_cache_size:
-                            # Remove a random item if cache is full
-                            self._technique_detection_cache.pop(next(iter(self._technique_detection_cache)))
-                        
-                        self._technique_detection_cache[query_hash] = valid_techniques
-                        return valid_techniques
-                    else:
-                        self.logger.warning("Model returned no valid techniques, using fallback")
+            # Process the model response
+            response_text = response.text.strip()
+            
+            # Find JSON array in the response if it's not a clean JSON
+            if not response_text.startswith('['):
+                import re
+                json_match = re.search(r'\[(.*?)\]', response_text)
+                if json_match:
+                    response_text = json_match.group(0)
                 else:
-                    self.logger.warning(f"Invalid model response format: {response.text}")
+                    # If no JSON array found, try to extract technique names directly
+                    techniques_names = ["chain_of_thought", "tree_of_thought", "iterative_refinement", 
+                                      "meta_critique", "react", "parallel_thought_chains", "iterative_loops"]
+                    found_techniques = []
+                    for technique in techniques_names:
+                        if technique.lower() in response_text.lower():
+                            found_techniques.append(technique)
+                    if found_techniques:
+                        self.logger.info(f"Extracted techniques from text: {found_techniques}")
+                        return found_techniques
+                    else:
+                        self.logger.warning("No techniques found in text, using fallback")
+                        return [self.select_technique(query)]
+            
+            # Try to parse the JSON response
+            techniques = None
+            try:
+                techniques = json.loads(response_text)
             except json.JSONDecodeError:
                 self.logger.warning(f"Could not parse model response as JSON: {response.text}")
+                fallback_technique = self.select_technique(query)
+                return [fallback_technique]
+            
+            # Process the techniques if JSON parsing was successful
+            if isinstance(techniques, list) and all(isinstance(t, str) for t in techniques):
+                # Validate that all techniques exist in our reasoning engine
+                valid_techniques = [t for t in techniques if t in self.reasoning_engine.techniques]
+                if valid_techniques:
+                    self.logger.info(f"Model detected reasoning techniques: {valid_techniques}")
+                
+                # Cache the result before returning
+                if len(self._technique_detection_cache) >= self._max_cache_size:
+                    # Remove a random item if cache is full
+                    self._technique_detection_cache.pop(next(iter(self._technique_detection_cache)))
+                
+                self._technique_detection_cache[query_hash] = valid_techniques
+                return valid_techniques
+            else:
+                self.logger.warning("Model returned no valid techniques, using fallback")
+                self.logger.warning(f"Invalid model response format: {response.text}")
                 
             # If we reach here, something went wrong with the model or parsing
             fallback_technique = self.select_technique(query)

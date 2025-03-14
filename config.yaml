@@ -144,7 +144,7 @@ models:
     cost_per_token: 0.0
 
 # Default model to use when no specific routing is needed
-default_model: hf-mixtral-7b
+default_model: phi-2
 
 # Lightweight model for reasoning technique detection
 lightweight_model: technique-detector

@@ -31,9 +31,17 @@ async def apply_techniques(self, techniques: List[str], prompt: str, model: Mode
     current_prompt = prompt
     current_response = None
     
+    # If techniques is a string instead of a list, convert it to a list with a single item
+    if isinstance(techniques, str):
+        techniques = [techniques]
+    
     for technique_name in techniques:
         if technique_name not in self.techniques:
-            raise ValueError(f"Unknown reasoning technique: {technique_name}")
+            # Log the error and continue with the next technique instead of raising an exception
+            import logging
+            logger = logging.getLogger("agnassan.reasoning")
+            logger.warning(f"Unknown reasoning technique: {technique_name}, skipping")
+            continue
         
         # Apply the technique
         current_response = await self.techniques[technique_name].apply(current_prompt, model, **kwargs)
@@ -41,6 +49,10 @@ async def apply_techniques(self, techniques: List[str], prompt: str, model: Mode
         # Update the prompt for the next technique if there is one
         current_prompt = current_response.text
     
+    # If no techniques were applied successfully, use the model directly
+    if current_response is None:
+        return await model.generate(prompt, **kwargs)
+        
     return current_response
 
 # Monkey patch the ReasoningEngine class

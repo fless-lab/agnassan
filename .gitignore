@@ -1,5 +1,4 @@
 /agnassan.log
 /**/__pycache__
 agnassan-venv
-models/mistral-7b
-models/mistral-7B-v0.1.tar
+models/**
